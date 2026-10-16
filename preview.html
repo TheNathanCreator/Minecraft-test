@@ -1,0 +1,414 @@
+
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Blocklands Beta</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;overflow:hidden;background:#87b9e6;color:white;font-family:Arial,sans-serif}
+canvas#game{width:100vw;height:100vh;display:block;image-rendering:pixelated}
+#hud{position:fixed;inset:0;pointer-events:none}
+#info{position:absolute;top:12px;left:12px;padding:12px;background:#111c;border:1px solid #ffffff33;border-radius:5px;font-size:12px;line-height:1.8}
+#info strong{color:#b5e77e;letter-spacing:2px}
+#crosshair{position:absolute;left:50%;top:50%;width:12px;height:12px;transform:translate(-50%,-50%)}
+#crosshair:before,#crosshair:after{content:"";position:absolute;background:white;box-shadow:0 0 2px black}
+#crosshair:before{width:2px;height:12px;left:5px}
+#crosshair:after{width:12px;height:2px;top:5px}
+#hotbar{position:absolute;bottom:15px;left:50%;transform:translateX(-50%);display:flex;gap:3px;padding:4px;background:#111b}
+.slot{width:49px;height:49px;border:2px solid #626262;background:#333b;display:grid;place-items:center;position:relative}
+.slot.active{border-color:white;outline:1px solid #222}
+.slot canvas{width:32px;height:32px;image-rendering:pixelated}
+.slot span{position:absolute;top:0;left:3px;font-size:10px}
+#inspect{position:absolute;right:12px;top:12px;width:200px;padding:12px;background:#111d;border:1px solid #ffffff33}
+#inspect canvas{width:100%;height:90px;image-rendering:pixelated;background:#283238}
+#inspect h3{margin:8px 0;font-size:16px}
+#inspect p{font-size:12px;line-height:1.5;color:#c7d0cc}
+button{pointer-events:auto;border:1px solid #738078;background:#303a35;color:white;padding:8px;cursor:pointer;margin:2px}
+button:hover{background:#506348}
+#hint{position:absolute;bottom:82px;left:50%;transform:translateX(-50%);background:#111b;padding:8px 12px;font-size:12px;white-space:nowrap}
+#start{position:fixed;inset:0;background:#172127b8;display:grid;place-items:center;z-index:5}
+#start section{width:min(450px,92vw);padding:28px;background:#18201ff5;border:1px solid #ffffff44}
+#start h1{margin:0;font-size:35px;letter-spacing:-1px}
+#start h1 span{color:#b5e77e}
+#start p{font-size:13px;line-height:1.7;color:#cbd5d0}
+#play{width:100%;padding:13px;background:#b5e77e;color:#182016;font-weight:bold;border:0}
+@media(max-width:650px){#inspect{width:145px;padding:7px}#inspect p{font-size:10px}.slot{width:37px;height:40px}#hint{font-size:10px;max-width:94%;white-space:normal;text-align:center}}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">
+ <div id="info">
+  <strong>BLOCKLANDS / BETA</strong><br>
+  <span id="coords">X 0 Y 0 Z 0</span><br>
+  <span id="stats">Chunks: 0</span><br>
+  <span id="seed"></span>
+ </div>
+ <div id="crosshair"></div>
+ <div id="hint">Klik om te spelen · WASD bewegen · Spatie springen · Linksklik breken · Rechtsklik plaatsen</div>
+ <div id="hotbar"></div>
+ <div id="inspect">
+  <canvas id="preview" width="200" height="90"></canvas>
+  <h3 id="blockname">Grasblok</h3>
+  <p id="blockdesc">Een blok met gras bovenop en aarde aan de zijkanten.</p>
+  <button id="save">Wereld opslaan</button>
+  <button id="load">Wereld laden</button>
+  <button id="newworld">Nieuwe wereld</button>
+ </div>
+</div>
+<div id="start">
+ <section>
+  <h1>BLOCK<span>LANDS</span></h1>
+  <p>Een procedurele voxelwereld in retro-pixelstijl. Het terrein bestaat uit individuele blokken. Geen vooraf gemaakte bomen, gebouwen of terreinmodellen.</p>
+  <p>De wereld wordt tijdens het verkennen in chunks gegenereerd. Dezelfde seed levert dezelfde basiswereld op.</p>
+  <button id="play">WERELD BETREDEN</button>
+ </section>
+</div>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js';
+
+const canvas=document.querySelector('#game');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:false});
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x87b9e6);
+scene.fog=new THREE.Fog(0x87b9e6,35,85);
+
+const camera=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,.1,130);
+scene.add(new THREE.HemisphereLight(0xd8edff,0x66513a,2));
+const sun=new THREE.DirectionalLight(0xfff0ce,2);
+sun.position.set(-30,60,20);
+scene.add(sun);
+
+const SIZE=16,VIEW=3,MAXY=32;
+let seed=Math.floor(Math.random()*999999);
+let chunks=new Map(),edits=new Map(),textures=new Map(),materials=new Map();
+let selected=1,slotIndex=0,locked=false,target=null;
+const hotbar=[1,2,3,4,5];
+const names={1:'Grasblok',2:'Aarde',3:'Steen',4:'Cobblestone',5:'Zand'};
+const descriptions={
+ 1:'Gras bovenop en aarde aan de zijkanten.',
+ 2:'Bruine aarde met een procedurele pixeltextuur.',
+ 3:'Grijze steen uit de diepere aardlagen.',
+ 4:'Grijze stenen met donkere, gebroken naden.',
+ 5:'Licht zand met kleine kleurverschillen.'
+};
+
+function hash(x,z,s=seed){
+ let n=Math.imul(x,374761393)+Math.imul(z,668265263)+Math.imul(s,1442695041);
+ n=Math.imul(n^(n>>>13),1274126177);
+ return ((n^(n>>>16))>>>0)/4294967295;
+}
+function smooth(t){return t*t*(3-2*t)}
+function noise(x,z,scale,salt=0){
+ const fx=x/scale,fz=z/scale,ix=Math.floor(fx),iz=Math.floor(fz);
+ const tx=smooth(fx-ix),tz=smooth(fz-iz);
+ const a=hash(ix,iz,seed+salt),b=hash(ix+1,iz,seed+salt);
+ const c=hash(ix,iz+1,seed+salt),d=hash(ix+1,iz+1,seed+salt);
+ return (a+(b-a)*tx)*(1-tz)+(c+(d-c)*tx)*tz;
+}
+function heightAt(x,z){
+ const n=noise(x,z,80,1)*.55+noise(x,z,28,2)*.3+noise(x,z,9,3)*.15;
+ return Math.floor(4+n*12);
+}
+
+// Alle pixeltexturen worden in code getekend.
+function texture(id,face='side'){
+ const key=id+':'+face;
+ if(textures.has(key))return textures.get(key);
+ const c=document.createElement('canvas');
+ c.width=c.height=16;
+ const ctx=c.getContext('2d');
+ let base;
+ if(id===1)base=face==='top'?[91,151,47]:[119,81,49];
+ else if(id===2)base=[119,81,49];
+ else if(id===3)base=[123,123,123];
+ else if(id===4)base=[115,115,115];
+ else base=[218,200,137];
+ ctx.fillStyle=`rgb(${base})`;ctx.fillRect(0,0,16,16);
+
+ for(let y=0;y<16;y++)for(let x=0;x<16;x++){
+  const r=hash(x+id*31,y+id*7,seed+face.length*99);
+  let col=base.map(v=>Math.max(0,Math.min(255,v+Math.floor((r-.5)*40))));
+  if(id===4){
+   const seam=(y%5===0)||((Math.floor(y/5)%2===0?x%8===0:(x+4)%8===0));
+   col=seam?[62,62,62]:[108+Math.floor(r*45),108+Math.floor(r*45),108+Math.floor(r*45)];
+  }
+  ctx.fillStyle=`rgb(${col.join(',')})`;ctx.fillRect(x,y,1,1);
+ }
+ if(id===1&&face==='side'){
+  for(let y=0;y<3;y++)for(let x=0;x<16;x++){
+   const r=hash(x,y,seed+54);
+   ctx.fillStyle=`rgb(${70+Math.floor(r*30)},${125+Math.floor(r*40)},${35+Math.floor(r*20)})`;
+   ctx.fillRect(x,y,1,1);
+  }
+ }
+ const t=new THREE.CanvasTexture(c);
+ t.magFilter=THREE.NearestFilter;t.minFilter=THREE.NearestFilter;
+ t.colorSpace=THREE.SRGBColorSpace;
+ textures.set(key,t);return t;
+}
+function mat(id,face){
+ const k=id+':'+face;
+ if(!materials.has(k))materials.set(k,new THREE.MeshLambertMaterial({map:texture(id,face)}));
+ return materials.get(k);
+}
+function blockKey(x,y,z){return `${x},${y},${z}`}
+function baseBlock(x,y,z){
+ const h=heightAt(x,z);
+ if(y>h)return 0;
+ if(y===h)return 1;
+ if(y>=h-3)return 2;
+ if(y<3)return 3;
+ return 3;
+}
+function getBlock(x,y,z){
+ if(y<0)return 3;
+ const k=blockKey(x,y,z);
+ if(edits.has(k))return edits.get(k);
+ return baseBlock(x,y,z);
+}
+function setBlock(x,y,z,id){
+ edits.set(blockKey(x,y,z),id);
+ const cx=Math.floor(x/SIZE),cz=Math.floor(z/SIZE);
+ rebuild(cx,cz);
+ if(x%SIZE===0)rebuild(cx-1,cz);
+ if(x%SIZE===SIZE-1)rebuild(cx+1,cz);
+ if(z%SIZE===0)rebuild(cx,cz-1);
+ if(z%SIZE===SIZE-1)rebuild(cx,cz+1);
+}
+
+// Maak alleen zichtbare blokvlakken en voeg die per textuur samen.
+const faces=[
+ {d:[1,0,0],n:[1,0,0],v:[[.5,-.5,-.5],[.5,.5,-.5],[.5,.5,.5],[.5,-.5,.5]],side:'side'},
+ {d:[-1,0,0],n:[-1,0,0],v:[[-.5,-.5,.5],[-.5,.5,.5],[-.5,.5,-.5],[-.5,-.5,-.5]],side:'side'},
+ {d:[0,1,0],n:[0,1,0],v:[[-.5,.5,.5],[.5,.5,.5],[.5,.5,-.5],[-.5,.5,-.5]],side:'top'},
+ {d:[0,-1,0],n:[0,-1,0],v:[[-.5,-.5,-.5],[.5,-.5,-.5],[.5,-.5,.5],[-.5,-.5,.5]],side:'bottom'},
+ {d:[0,0,1],n:[0,0,1],v:[[.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5],[-.5,-.5,.5]],side:'side'},
+ {d:[0,0,-1],n:[0,0,-1],v:[[-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5],[.5,-.5,-.5]],side:'side'}
+];
+function buildChunk(cx,cz){
+ const group=new THREE.Group();
+ group.position.set(cx*SIZE,0,cz*SIZE);
+ const batches=new Map();
+ for(let lx=0;lx<SIZE;lx++)for(let lz=0;lz<SIZE;lz++){
+  const x=cx*SIZE+lx,z=cz*SIZE+lz,h=heightAt(x,z);
+  for(let y=0;y<=h;y++){
+   const id=getBlock(x,y,z);if(!id)continue;
+   for(let fi=0;fi<6;fi++){
+    const f=faces[fi];
+    if(getBlock(x+f.d[0],y+f.d[1],z+f.d[2])!==0)continue;
+    let side=f.side;
+    if(id!==1&&side==='top')side='side';
+    if(id!==1&&side==='bottom')side='side';
+    const key=id+':'+side;
+    if(!batches.has(key))batches.set(key,{id,side,p:[],n:[],uv:[],idx:[]});
+    const b=batches.get(key),start=b.p.length/3;
+    for(const v of f.v){
+     b.p.push(lx+v[0],y+v[1],lz+v[2]);
+     b.n.push(...f.n);
+    }
+    b.uv.push(0,0,0,1,1,1,1,0);
+    b.idx.push(start,start+1,start+2,start,start+2,start+3);
+   }
+  }
+ }
+ for(const b of batches.values()){
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(b.p,3));
+  g.setAttribute('normal',new THREE.Float32BufferAttribute(b.n,3));
+  g.setAttribute('uv',new THREE.Float32BufferAttribute(b.uv,2));
+  g.setIndex(b.idx);g.computeBoundingSphere();
+  group.add(new THREE.Mesh(g,mat(b.id,b.side)));
+ }
+ scene.add(group);
+ return {group,cx,cz};
+}
+function disposeChunk(c){
+ scene.remove(c.group);
+ c.group.traverse(o=>{if(o.geometry)o.geometry.dispose()});
+}
+function rebuild(cx,cz){
+ const k=`${cx},${cz}`;
+ if(chunks.has(k))disposeChunk(chunks.get(k));
+ chunks.set(k,buildChunk(cx,cz));
+}
+function updateChunks(){
+ const cx=Math.floor(player.x/SIZE),cz=Math.floor(player.z/SIZE);
+ for(let dx=-VIEW;dx<=VIEW;dx++)for(let dz=-VIEW;dz<=VIEW;dz++){
+  if(dx*dx+dz*dz>VIEW*VIEW+1)continue;
+  const x=cx+dx,z=cz+dz,k=`${x},${z}`;
+  if(!chunks.has(k))rebuild(x,z);
+ }
+ for(const [k,c] of chunks){
+  if(Math.abs(c.cx-cx)>VIEW+1||Math.abs(c.cz-cz)>VIEW+1){
+   disposeChunk(c);chunks.delete(k);
+  }
+ }
+ document.querySelector('#stats').textContent=`Chunks: ${chunks.size}`;
+}
+
+// First-personspeler met zwaartekracht en botsing.
+const player={x:0,y:20,z:0,yaw:0,pitch:0,vy:0,ground:false};
+const keys={};
+function solid(x,y,z){return getBlock(Math.floor(x),Math.floor(y),Math.floor(z))!==0}
+function collision(x,y,z){
+ for(const dx of [-.28,.28])for(const dz of [-.28,.28])
+  for(const dy of [.15,1.55])
+   if(solid(x+dx,y+dy,z+dz))return true;
+ return false;
+}
+function move(dt){
+ let fx=0,fz=0;
+ if(keys.KeyW){fx+=Math.sin(player.yaw);fz-=Math.cos(player.yaw)}
+ if(keys.KeyS){fx-=Math.sin(player.yaw);fz+=Math.cos(player.yaw)}
+ if(keys.KeyA){fx-=Math.cos(player.yaw);fz-=Math.sin(player.yaw)}
+ if(keys.KeyD){fx+=Math.cos(player.yaw);fz+=Math.sin(player.yaw)}
+ const len=Math.hypot(fx,fz)||1;
+ const speed=keys.ShiftLeft?8:5;
+ fx=fx/len*speed;fz=fz/len*speed;
+ player.x+=collision(player.x+fx*dt,player.y,player.z)?0:fx*dt;
+ player.z+=collision(player.x,player.y,player.z+fz*dt)?0:fz*dt;
+ player.vy-=22*dt;
+ if(keys.Space&&player.ground){player.vy=8;player.ground=false}
+ const ny=player.y+player.vy*dt;
+ if(!collision(player.x,ny,player.z)){player.y=ny;player.ground=false}
+ else{if(player.vy<0)player.ground=true;player.vy=0}
+ if(player.y< -10){player.x=0;player.z=0;player.y=heightAt(0,0)+3;player.vy=0}
+ camera.position.set(player.x,player.y+1.5,player.z);
+ camera.rotation.order='YXZ';
+ camera.rotation.y=player.yaw;camera.rotation.x=player.pitch;
+}
+const ray=new THREE.Raycaster();ray.far=6;
+const outline=new THREE.LineSegments(
+ new THREE.EdgesGeometry(new THREE.BoxGeometry(1.01,1.01,1.01)),
+ new THREE.LineBasicMaterial({color:0xffffff,depthTest:false})
+);
+outline.visible=false;outline.renderOrder=4;scene.add(outline);
+function findTarget(){
+ ray.setFromCamera(new THREE.Vector2(0,0),camera);
+ const hits=[];
+ for(const c of chunks.values())hits.push(...ray.intersectObject(c.group,true));
+ hits.sort((a,b)=>a.distance-b.distance);
+ if(!hits.length){target=null;outline.visible=false;return}
+ const h=hits[0],p=h.point.clone().addScaledVector(h.face.normal,-.01);
+ const x=Math.floor(p.x),y=Math.floor(p.y),z=Math.floor(p.z);
+ target={x,y,z,normal:h.face.normal.clone(),id:getBlock(x,y,z)};
+ outline.position.set(x+.5,y+.5,z+.5);outline.visible=true;
+ showBlock(target.id);
+}
+function showBlock(id){
+ if(!id)return;
+ document.querySelector('#blockname').textContent=names[id]||'Onbekend blok';
+ document.querySelector('#blockdesc').textContent=descriptions[id]||'Gegenereerd voxelblok.';
+ const c=document.querySelector('#preview').getContext('2d');
+ c.clearRect(0,0,200,90);c.imageSmoothingEnabled=false;
+ const top=texture(id,id===1?'top':'side').image,side=texture(id,'side').image;
+ c.save();
+ c.beginPath();c.moveTo(45,33);c.lineTo(100,10);c.lineTo(155,33);c.lineTo(100,56);c.closePath();c.clip();c.drawImage(top,45,10,110,46);c.restore();
+ c.save();c.beginPath();c.moveTo(45,33);c.lineTo(100,56);c.lineTo(100,83);c.lineTo(45,60);c.closePath();c.clip();c.drawImage(side,45,33,55,50);c.restore();
+ c.save();c.beginPath();c.moveTo(100,56);c.lineTo(155,33);c.lineTo(155,60);c.lineTo(100,83);c.closePath();c.clip();c.drawImage(side,100,33,55,50);c.restore();
+}
+function choose(i){
+ slotIndex=(i+hotbar.length)%hotbar.length;selected=hotbar[slotIndex];
+ document.querySelectorAll('.slot').forEach((s,j)=>s.classList.toggle('active',j===slotIndex));
+ showBlock(selected);
+}
+const bar=document.querySelector('#hotbar');
+hotbar.forEach((id,i)=>{
+ const d=document.createElement('div');d.className='slot'+(i===0?' active':'');
+ d.innerHTML=`<span>${i+1}</span><canvas width="16" height="16"></canvas>`;
+ d.querySelector('canvas').getContext('2d').drawImage(texture(id,id===1?'top':'side').image,0,0,16,16);
+ d.onclick=()=>choose(i);bar.append(d);
+});
+function edit(place){
+ if(!target)return;
+ if(!place){setBlock(target.x,target.y,target.z,0);return}
+ const n=target.normal;
+ const x=target.x+Math.round(n.x),y=target.y+Math.round(n.y),z=target.z+Math.round(n.z);
+ if(y<0||y>=MAXY)return;
+ if(Math.floor(player.x)===x&&Math.floor(player.z)===z&&y>=Math.floor(player.y)&&y<=Math.floor(player.y+1.8))return;
+ setBlock(x,y,z,selected);
+}
+canvas.addEventListener('click',()=>{
+ if(!locked)canvas.requestPointerLock();
+ else edit(false);
+});
+canvas.addEventListener('contextmenu',e=>{e.preventDefault();if(locked)edit(true)});
+document.addEventListener('pointerlockchange',()=>{
+ locked=document.pointerLockElement===canvas;
+ document.querySelector('#hint').textContent=locked?
+ 'WASD bewegen · Spatie springen · Linksklik breken · Rechtsklik plaatsen · Esc loslaten':
+ 'Klik op de wereld om te spelen';
+});
+document.addEventListener('mousemove',e=>{
+ if(!locked)return;
+ player.yaw-=e.movementX*.002;
+ player.pitch-=e.movementY*.002;
+ player.pitch=Math.max(-1.5,Math.min(1.5,player.pitch));
+});
+document.addEventListener('keydown',e=>{
+ keys[e.code]=true;
+ if(e.code.startsWith('Digit')){
+  const n=Number(e.code.slice(5));if(n>=1&&n<=5)choose(n-1);
+ }
+ if(e.code==='Space')e.preventDefault();
+});
+document.addEventListener('keyup',e=>keys[e.code]=false);
+addEventListener('wheel',e=>{if(locked)choose(slotIndex+(e.deltaY>0?1:-1))},{passive:true});
+
+document.querySelector('#play').onclick=()=>{
+ document.querySelector('#start').style.display='none';canvas.requestPointerLock();
+};
+document.querySelector('#save').onclick=()=>{
+ try{
+  localStorage.setItem('blocklands-save',JSON.stringify({
+   seed,player,edits:[...edits]
+  }));
+  alert('Wereld opgeslagen in deze browser.');
+ }catch(e){alert('Opslaan mislukt.')}
+};
+document.querySelector('#load').onclick=()=>{
+ try{
+  const d=JSON.parse(localStorage.getItem('blocklands-save'));
+  if(!d)throw Error();
+  seed=d.seed;Object.assign(player,d.player);edits=new Map(d.edits);
+  for(const c of chunks.values())disposeChunk(c);
+  chunks.clear();textures.clear();materials.clear();updateChunks();
+  document.querySelector('#seed').textContent='Seed: '+seed;
+ }catch(e){alert('Geen opgeslagen wereld gevonden.')}
+};
+document.querySelector('#newworld').onclick=()=>{
+ if(!confirm('Een nieuwe wereld maken? Niet-opgeslagen wijzigingen gaan verloren.'))return;
+ seed=Math.floor(Math.random()*999999);
+ edits.clear();textures.clear();materials.clear();
+ for(const c of chunks.values())disposeChunk(c);
+ chunks.clear();player.x=0;player.z=0;player.y=heightAt(0,0)+4;player.vy=0;
+ document.querySelector('#seed').textContent='Seed: '+seed;
+ updateChunks();
+};
+document.querySelector('#seed').textContent='Seed: '+seed;
+player.y=heightAt(0,0)+4;
+
+function animate(){
+ requestAnimationFrame(animate);
+ const dt=Math.min(clock.getDelta(),.04);
+ if(locked)move(dt);
+ updateChunks();findTarget();
+ document.querySelector('#coords').textContent=
+ `X ${Math.floor(player.x)} Y ${Math.floor(player.y)} Z ${Math.floor(player.z)}`;
+ renderer.render(scene,camera);
+}
+updateChunks();showBlock(1);animate();
+addEventListener('resize',()=>{
+ camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();
+ renderer.setSize(innerWidth,innerHeight);
+ renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
+});
+</script>
+</body>
+</html>
